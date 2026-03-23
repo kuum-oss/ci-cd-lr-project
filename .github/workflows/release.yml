@@ -3,9 +3,6 @@ name: Release and Update README
 on:
   push:
     branches: [ main ]
-    # Запускаємо тільки якщо це не автоматичний коміт від самого себе (щоб уникнути рекурсії при оновленні README)
-    # Але зазвичай GitHub Actions самі це роблять через GITHUB_TOKEN.
-    # Найкраще перевіряти pull_request_merge, але push у main після PR — теж ок.
 
 jobs:
   release:
@@ -13,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      pull-requests: write
+      pull-requests: read
     steps:
       - uses: actions/checkout@v4
         with:
@@ -27,11 +24,17 @@ jobs:
 
       - name: Get PR Info
         id: pr_info
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Спробуємо знайти PR, пов'язаний з цим комітом
-          PR_TITLE=$(git log -1 --pretty=%s)
-          # Якщо це merge commit, він зазвичай має назву "Merge pull request #X from branch"
-          # Спробуємо отримати оригінальний заголовок PR через GitHub API або останній коміт
+          # Спробуємо отримати заголовок PR через GitHub CLI
+          PR_TITLE=$(gh pr list --base main --state merged --limit 1 --json title --template '{{range .}}{{.title}}{{end}}')
+          
+          # Якщо PR_TITLE порожній (наприклад, прямий пуш у main), використаємо повідомлення коміту
+          if [ -z "$PR_TITLE" ]; then
+            PR_TITLE=$(git log -1 --pretty=%s)
+          fi
+          
           echo "title=$PR_TITLE" >> $GITHUB_OUTPUT
 
       - name: Create Version
@@ -46,13 +49,18 @@ jobs:
           PR_TITLE="${{ steps.pr_info.outputs.title }}"
           JOKE="${{ steps.joke.outputs.joke }}"
           
-          # Видаляємо старий блок, якщо він є, і додаємо новий
-          # Шукаємо заголовок ## Latest Release Info і все під ним до кінця або наступного ##
-          # Простіше просто перезаписати або додати в кінець, якщо ми знаємо структуру.
-          # В даному випадку в README вже є блок в кінці.
+          # Оновлюємо README.md: видаляємо старий блок і додаємо новий.
+          # Використовуємо perl для надійнішої багаторядкової заміни або просто sed.
+          # Оскільки блок в кінці, sed '/## Latest Release Info/,$d' спрацює.
           
-          sed -i '/## Latest Release Info/,$d' README.md
+          if grep -q "## Latest Release Info" README.md; then
+            sed -i '/## Latest Release Info/,$d' README.md
+          fi
           
+          # Видаляємо зайві порожні рядки в кінці перед додаванням
+          sed -i -e :a -e '/^\n*$/{$d;N;ba' -e '}' README.md
+
+          echo "" >> README.md
           echo "## Latest Release Info" >> README.md
           echo "- Version: $VERSION" >> README.md
           echo "- PR Title: $PR_TITLE" >> README.md
@@ -60,6 +68,7 @@ jobs:
 
       - name: Commit and Push README
         run: |
+          VERSION="${{ steps.version.outputs.version }}"
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add README.md
